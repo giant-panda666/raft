@@ -11,7 +11,7 @@ import (
 var DefaultConfig = &Config{
 	HeartBeatInterval:   20,
 	ElectionMinTimeout:  150,
-	ElectionRandTimeout: 200,
+	ElectionRandTimeout: 150,
 }
 
 var stopMu sync.Mutex
@@ -74,11 +74,11 @@ func (lr *leaderRecord) isValid(t *testing.T) {
 
 ///////////////////// leader election ////////////
 func TestInitialElection(t *testing.T) {
-	makeServers(4)
-	time.Sleep(1 * time.Second)
+	makeServers(3)
+	time.Sleep(6 * time.Second)
 	recordLeader.isValid(t)
 
-	stopMu.Lock()
-	stopRaftServer = true
-	stopMu.Unlock()
+	//	stopMu.Lock()
+	//	stopRaftServer = true
+	//	stopMu.Unlock()
 }

@@ -52,9 +52,11 @@ func (rf *Raft) RequestVotes(ctx context.Context, args *pb.RequestVotesArgs) (*p
 	if rf.me.curTerm > args.Term || (rf.me.curTerm == args.Term && rf.me.votedFor == args.CandidateID) {
 		return reply, err
 	} else if rf.me.curTerm < args.Term {
+		DPrintf("RequestVotes, curTerm < args.Term, before ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 		rf.me.updateCurTerm(args.Term)
 		rf.updateStateTo(followerState)
 		reply.Term = args.Term
+		DPrintf("RequestVotes, curTerm < args.Term, after ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 	}
 
 	if rf.me.votedFor == none {
@@ -67,6 +69,7 @@ func (rf *Raft) RequestVotes(ctx context.Context, args *pb.RequestVotesArgs) (*p
 		reply.VoteGranted = true
 		rf.updateStateTo(followerState)
 		rf.me.grantVote(args.CandidateID)
+		DPrintf("RequestVotes, voteFor:%v, ID:%v, term:%v, curState:%v\n", args.CandidateID, rf.me.ID, rf.me.curTerm, rf.me.curState)
 		rf.voteGrantedChan <- struct{}{}
 	}
 
@@ -103,7 +106,8 @@ func (rf *Raft) doRequestVote(peer uint64, args *pb.RequestVotesArgs) {
 		rf.updateStateTo(followerState)
 	} else if reply.VoteGranted {
 		rf.me.voteCounter++
-		if rf.me.voteCounter > uint64(len(rf.peers)>>1) || rf.me.curState == candidateState {
+		if rf.me.voteCounter > uint64(len(rf.peers)/2) && rf.me.curState == candidateState {
+			DPrintf("////////////////////leader:%v, vote:%v, uint64(len(rf.peers)/2):%v\n", rf.me.ID, rf.me.voteCounter, uint64(len(rf.peers)/2))
 			rf.updateStateTo(leaderState)
 			// for-testing
 			recordLeader.record(rf)
@@ -120,6 +124,7 @@ func (rf *Raft) broadcastRequestVotes() {
 		LastLogTerm:  rf.me.lastLogTerm(),
 		LastLogIndex: rf.me.lastLogIndex(),
 	}
+	DPrintf("len(peers):%v\n", len(rf.peers))
 	rf.mu.Unlock()
 	for i := range rf.peers {
 		if uint64(i) != rf.me.ID {
@@ -131,21 +136,27 @@ func (rf *Raft) broadcastRequestVotes() {
 func (rf *Raft) run() {
 	for {
 		// for-testing
-		stopMu.Lock()
-		res := stopRaftServer
-		stopMu.Unlock()
-		if res {
-			return
-		}
+		//		stopMu.Lock()
+		//		res := stopRaftServer
+		//		stopMu.Unlock()
+		//		if res {
+		//			return
+		//		}
 
 		rf.mu.Lock()
 		curState := rf.me.curState
+		DPrintf("before switch curState, ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 		rf.mu.Unlock()
 
 		switch curState {
 		case leaderState:
 			// rf.broadcastAppendEntries()
-			time.Sleep(time.Duration(rf.config.HeartBeatInterval) * time.Millisecond)
+			select {
+			case <-rf.voteGrantedChan:
+			case <-rf.heartbeatChan:
+			case <-time.After(time.Duration(rf.config.HeartBeatInterval) * time.Millisecond):
+			}
+			DPrintf("leaderState, ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 		case followerState:
 			select {
 			case <-rf.heartbeatChan:
@@ -153,6 +164,7 @@ func (rf *Raft) run() {
 			case <-time.After(time.Duration(rf.config.randElectionTimeout()) * time.Millisecond):
 				rf.mu.Lock()
 				rf.updateStateTo(candidateState)
+				DPrintf("=============followerState to candidateState, ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 				rf.mu.Unlock()
 			}
 		case candidateState:
@@ -164,6 +176,7 @@ func (rf *Raft) run() {
 			case <-time.After(time.Duration(rf.config.randElectionTimeout()) * time.Millisecond):
 				rf.mu.Lock()
 				rf.updateStateTo(candidateState)
+				DPrintf("candidateState to candidateState, ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 				rf.mu.Unlock()
 			}
 		}
