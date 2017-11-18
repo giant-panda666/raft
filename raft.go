@@ -49,7 +49,7 @@ func (rf *Raft) RequestVotes(ctx context.Context, args *pb.RequestVotesArgs) (*p
 		VoteGranted: false,
 	}
 
-	if rf.me.curTerm > args.Term || rf.me.votedFor == args.CandidateID {
+	if rf.me.curTerm > args.Term || (rf.me.curTerm == args.Term && rf.me.votedFor == args.CandidateID) {
 		return reply, err
 	} else if rf.me.curTerm < args.Term {
 		rf.me.updateCurTerm(args.Term)
