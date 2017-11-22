@@ -1,6 +1,9 @@
 package raft
 
 import (
+	"bytes"
+	"encoding/gob"
+	"log"
 	pb "raft/raftpb"
 )
 
@@ -29,6 +32,9 @@ type Node struct {
 	matchIndex  []uint64
 
 	applyMsg chan ApplyMsg
+
+	// persister
+	persister *persister
 }
 
 type stateType int
@@ -39,6 +45,31 @@ const (
 	leaderState
 	candidateState
 )
+
+func (n *Node) readPersistState() {
+	data, err := n.persister.readPersistState()
+	if err == ErrNoPersisterFile {
+		return
+	}
+
+	buf := bytes.NewBuffer(data)
+	decoder := gob.NewDecoder(buf)
+	decoder.Decode(&n.curTerm)
+	decoder.Decode(&n.votedFor)
+	decoder.Decode(&n.entries)
+}
+
+func (n *Node) savePersistState() {
+	buf := new(bytes.Buffer)
+	encoder := gob.NewEncoder(buf)
+	encoder.Encode(n.curTerm)
+	encoder.Encode(n.votedFor)
+	encoder.Encode(n.entries)
+	err := n.persister.savePersistState(buf.Bytes())
+	if err != nil {
+		log.Printf("node:%v savePersistState curTerm:%v, votedFor:%v\nlog entries:%v\nerror:%v\n", n.ID, n.curTerm, n.votedFor, n.entries, err)
+	}
+}
 
 const none uint64 = 0 // none vote for somebody
 

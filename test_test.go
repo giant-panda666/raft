@@ -2,8 +2,10 @@ package raft
 
 import (
 	//	"log"
+	"os"
 	pb "raft/raftpb"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -65,6 +67,11 @@ type leaderRecord struct {
 	r  map[uint64][]uint64 // one term map to leaders
 }
 
+// reset test enviroment
+func reset(t *testing.T) {
+	removeTmpPersisterFile(t)
+	recordLeader.reset()
+}
 func (lr *leaderRecord) reset() {
 	lr.mu.Lock()
 	defer lr.mu.Unlock()
@@ -105,9 +112,28 @@ func (lr *leaderRecord) checkLeader(t *testing.T) {
 	}
 }
 
+func removeTmpPersisterFile(t *testing.T) {
+	d, err := os.Open(workDir)
+	if err != nil {
+		t.Errorf("reset tmp dir failed:%v\n", err)
+	}
+	defer d.Close()
+
+	names, _ := d.Readdirnames(-1)
+	for _, name := range names {
+		if strings.HasSuffix(name, "raft") {
+			err = os.Remove(workDir + name)
+			if err != nil {
+				t.Errorf("remove tmp file failed:%v\n", err)
+			}
+		}
+	}
+}
+
 ///////////////////// leader election ////////////
 func TestInitialElection(t *testing.T) {
-	recordLeader.reset()
+	reset(t)
+
 	servers, _ := makeServers(3)
 	time.Sleep(time.Second)
 
@@ -120,8 +146,9 @@ func TestInitialElection(t *testing.T) {
 }
 
 ///////////////log replication/////////////
-func TestLogReplicatedToLeaderFollowerCandidate(t *testing.T) {
-	recordLeader.reset()
+func TestLogReplication(t *testing.T) {
+	reset(t)
+
 	servers, applies := makeServers(3)
 	var msg = []string{
 		"hello",
@@ -142,7 +169,7 @@ func TestLogReplicatedToLeaderFollowerCandidate(t *testing.T) {
 	time.Sleep(time.Second)
 	leaderIndex := findLeader(t, servers)
 
-	// --------------lsend log entry to leader, reply should be ok-------------------
+	// --------------send log entry to leader, reply should be ok-------------------
 	reply, err := servers[leaderIndex].Propose(context.Background(), args[leaderIndex])
 	if err != nil {
 		t.Errorf("Propose RPC error:%s\n", err.Error())
@@ -201,4 +228,27 @@ func TestLogReplicatedToLeaderFollowerCandidate(t *testing.T) {
 		t.Errorf("send log entry to candidate failed...propose returns false...reply:%v\n", *reply)
 	}
 	t.Logf("send log entry to candidate passed...\n")
+
+	// all server exit, clean persister file
+	servers[candidateIndex].Kill()
+}
+
+///////////////////// persister raft state ////////////
+func TestPersistRaftState(t *testing.T) {
+	reset(t)
+
+	server0, _ := makeServers(2)
+	time.Sleep(time.Second)
+	leaderIndex := findLeader(t, server0)
+	server0[leaderIndex].Propose(context.Background(), &pb.ProposeArgs{Data: []byte("helloworld")})
+	lenentries := len(server0[leaderIndex].me.entries)
+	stopServers(server0)
+	time.Sleep(time.Second)
+
+	server1, _ := makeServers(2)
+	time.Sleep(time.Second)
+	if len(server1[leaderIndex].me.entries) != lenentries {
+		t.Errorf("persister raft state failed...\nlen(entries):%v, after restart\nlen(entries):%v\n", lenentries, len(server1[leaderIndex].me.entries))
+	}
+	t.Logf("persist raft state passed...\n")
 }

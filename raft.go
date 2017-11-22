@@ -57,6 +57,7 @@ func (rf *Raft) RequestVotes(ctx context.Context, args *pb.RequestVotesArgs) (*p
 		DPrintf(1, "RequestVotes, curTerm < args.Term, before ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 		rf.me.updateCurTerm(args.Term)
 		rf.updateStateTo(followerState)
+		rf.me.savePersistState()
 		reply.Term = args.Term
 		DPrintf(1, "RequestVotes, curTerm < args.Term, after ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 	}
@@ -71,6 +72,7 @@ func (rf *Raft) RequestVotes(ctx context.Context, args *pb.RequestVotesArgs) (*p
 		reply.VoteGranted = true
 		rf.updateStateTo(followerState)
 		rf.me.grantVote(args.CandidateID)
+		rf.me.savePersistState()
 		DPrintf(1, "RequestVotes, voteFor:%v, ID:%v, term:%v, curState:%v\n", args.CandidateID, rf.me.ID, rf.me.curTerm, rf.me.curState)
 		rf.voteGrantedChan <- struct{}{}
 	}
@@ -106,6 +108,7 @@ func (rf *Raft) doRequestVote(peer uint64, args *pb.RequestVotesArgs) {
 	} else if rf.me.curTerm < reply.Term {
 		rf.me.updateCurTerm(reply.Term)
 		rf.updateStateTo(followerState)
+		rf.me.savePersistState()
 	} else if reply.VoteGranted {
 		rf.me.voteCounter++
 		if rf.me.voteCounter > uint64(len(rf.me.peers)/2) && rf.me.curState == candidateState {
@@ -138,6 +141,7 @@ func (rf *Raft) broadcastRequestVotes() {
 func (rf *Raft) AppendEntries(ctx context.Context, args *pb.AppendEntriesArgs) (reply *pb.AppendEntriesReply, err error) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.me.savePersistState()
 
 	reply = &pb.AppendEntriesReply{
 		Term:    rf.me.curTerm,
@@ -200,6 +204,7 @@ func (rf *Raft) doAppendEntry(peer uint64, args *pb.AppendEntriesArgs) {
 	if rf.me.curTerm < reply.Term {
 		rf.me.curTerm = reply.Term
 		rf.me.updateStateTo(followerState)
+		rf.me.savePersistState()
 		return
 	}
 
@@ -284,6 +289,7 @@ func (rf *Raft) run() {
 		select {
 		case <-rf.exitChan:
 			// todo some persist
+			rf.me.savePersistState()
 			return
 		default:
 			rf.mu.Lock()
@@ -319,6 +325,7 @@ func (rf *Raft) run() {
 				case <-time.After(time.Duration(rf.config.randElectionTimeout()) * time.Millisecond):
 					rf.mu.Lock()
 					rf.updateStateTo(candidateState)
+					rf.me.savePersistState()
 					DPrintf(1, "candidateState to candidateState, ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 					rf.mu.Unlock()
 				}
@@ -396,10 +403,13 @@ func Make(config *Config, peers []*Node, me *Node, applyMsg chan ApplyMsg) *Raft
 
 	rf.me.peers = peers
 	rf.me.curState = followerState
+	rf.me.leader = unknownLeader
 	rf.me.curTerm = 0
 	rf.me.votedFor = none
 	rf.me.applyMsg = applyMsg
 	rf.me.entries = append(rf.me.entries, &pb.Entry{Type: pb.EntryType_Normal, Term: 0, Index: 0})
+	rf.me.persister = newPersister(rf.me.ID)
+	rf.me.readPersistState()
 
 	go rf.registerRPCServer()
 	go rf.run()
