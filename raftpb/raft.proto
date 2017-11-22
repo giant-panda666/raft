@@ -5,11 +5,14 @@ package raftpb;
 service Raft {
     rpc AppendEntries(AppendEntriesArgs) returns(AppendEntriesReply){}
     rpc RequestVotes(RequestVotesArgs) returns(RequestVotesReply){}
+    rpc Propose(ProposeArgs) returns(ProposeReply){}
+    rpc ProposeConfChange(ProposeArgs) returns(ProposeReply){}
 }
 
 enum EntryType {
     Normal = 0;
     Config = 1;
+    None = 2;
 }
 
 message Entry {
@@ -43,4 +46,17 @@ message RequestVotesArgs {
 message RequestVotesReply {
     uint64 Term = 1;
     bool VoteGranted = 2;
+}
+
+// ProposeArgs is the log entry stored in Data which will be replicated to raft servers.
+message ProposeArgs {
+    bytes Data = 1;
+}
+
+// ProposeReply returns the proposes's result. If Success is True, propose succeeds. Otherwise, ErrCode indicates the error reason. ErrNotReady means you can retry later; ErrNotLeader means the current server is not leader, you should ask for Addr server.
+message ProposeReply {
+    bool Success = 1;
+    uint64 ErrCode = 2;
+    string ErrMsg = 3;
+    string Addr = 4;
 }

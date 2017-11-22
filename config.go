@@ -15,3 +15,10 @@ func (c *Config) randElectionTimeout() int64 {
 	rand.Seed(time.Now().UnixNano())
 	return c.ElectionMinTimeout + rand.Int63n(c.ElectionRandTimeout)
 }
+
+// DefaultConfig sets heartbeatInterval 20ms, electionMinTimeout 150ms-300ms
+var DefaultConfig = &Config{
+	HeartBeatInterval:   20,
+	ElectionMinTimeout:  150,
+	ElectionRandTimeout: 150,
+}
