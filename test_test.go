@@ -113,7 +113,7 @@ func (lr *leaderRecord) checkLeader(t *testing.T) {
 }
 
 func removeTmpPersisterFile(t *testing.T) {
-	d, err := os.Open(workDir)
+	d, err := os.Open(DefaultConfig.WorkDir)
 	if err != nil {
 		t.Errorf("reset tmp dir failed:%v\n", err)
 	}
@@ -122,7 +122,7 @@ func removeTmpPersisterFile(t *testing.T) {
 	names, _ := d.Readdirnames(-1)
 	for _, name := range names {
 		if strings.HasSuffix(name, "raft") {
-			err = os.Remove(workDir + name)
+			err = os.Remove(DefaultConfig.WorkDir + name)
 			if err != nil {
 				t.Errorf("remove tmp file failed:%v\n", err)
 			}
@@ -243,7 +243,7 @@ func TestPersistRaftState(t *testing.T) {
 	server0[leaderIndex].Propose(context.Background(), &pb.ProposeArgs{Data: []byte("helloworld")})
 	lenentries := len(server0[leaderIndex].me.entries)
 	stopServers(server0)
-	time.Sleep(time.Second)
+	time.Sleep(2 * time.Second)
 
 	server1, _ := makeServers(2)
 	time.Sleep(time.Second)

@@ -9,6 +9,10 @@ type Config struct {
 	HeartBeatInterval   int64
 	ElectionMinTimeout  int64
 	ElectionRandTimeout int64
+
+	WorkDir string
+
+	Peers []*Node
 }
 
 func (c *Config) randElectionTimeout() int64 {
@@ -21,4 +25,5 @@ var DefaultConfig = &Config{
 	HeartBeatInterval:   20,
 	ElectionMinTimeout:  150,
 	ElectionRandTimeout: 150,
+	WorkDir:             "/tmp/",
 }

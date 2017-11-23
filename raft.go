@@ -1,10 +1,15 @@
 package raft
 
 import (
+	"bytes"
+	"encoding/gob"
 	"errors"
+	"io/ioutil"
 	"log"
 	"net"
+	"os"
 	pb "raft/raftpb"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +18,8 @@ import (
 
 	"golang.org/x/net/context"
 )
+
+const snapshotChunkSize = 2 << 31
 
 type ApplyMsg struct {
 	Index       uint64
@@ -39,6 +46,10 @@ type Raft struct {
 
 	exited   bool
 	exitChan chan struct{}
+
+	snapMu       sync.Mutex
+	isDuringSnap []bool
+	storage      Storage
 }
 
 func (rf *Raft) RequestVotes(ctx context.Context, args *pb.RequestVotesArgs) (*pb.RequestVotesReply, error) {
@@ -244,13 +255,24 @@ func (rf *Raft) broadcastAppendEntries() {
 			continue
 		}
 		prevLogEntry := rf.me.prevLog(uint64(i))
-		//		if prevLogEntry.Type == pb.EntryType_Normal && prevLogEntry.Term == 0 {
-		//			// sends heartbeats
-		//			go rf.doAppendEntry(uint64(i), &args)
-		//			continue
-		//		}
 		if prevLogEntry.Type == pb.EntryType_None {
-			// todo needs to send snapshot
+			rf.snapMu.Lock()
+			if rf.isDuringSnap[i] { // already in install snapshot
+				rf.snapMu.Unlock()
+				return
+			}
+			rf.isDuringSnap[i] = true
+			rf.snapMu.Unlock()
+
+			args := pb.InstallSnapshotArgs{
+				Term:     rf.me.curTerm,
+				LeaderID: rf.me.ID,
+			}
+			rf.readLastConfig(&args)
+			rf.readSnapshot(&args)
+			rf.readLastIncludeEntry(&args)
+
+			go rf.doInstallSnapshot(uint64(i), &args)
 			continue
 		}
 		// sends current entry to the end
@@ -262,6 +284,118 @@ func (rf *Raft) broadcastAppendEntries() {
 		DPrintf(0, "baseIndex:%v, prevLogIndex:%v, PrevLogTerm:%v, rf.me.entries:%v, args.Entries:%v\n", baseIndex, args.PrevLogIndex, args.PrevLogTerm, rf.me.entries, args.Entries)
 		go rf.doAppendEntry(uint64(i), &args)
 	}
+}
+
+func (rf *Raft) readLastConfig(args *pb.InstallSnapshotArgs) {
+	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".conf"
+	args.LastConfig, _ = ioutil.ReadFile(fileName)
+}
+
+func (rf *Raft) saveLastConfig(args *pb.InstallSnapshotArgs) {
+	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".conf"
+	ioutil.WriteFile(fileName, args.LastConfig, os.ModePerm)
+}
+
+func (rf *Raft) readSnapshot(args *pb.InstallSnapshotArgs) {
+	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".snapshot"
+	args.Data, _ = ioutil.ReadFile(fileName)
+}
+
+func (rf *Raft) saveSnapshot(args *pb.InstallSnapshotArgs) {
+	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".snapshot"
+	ioutil.WriteFile(fileName, args.Data, os.ModePerm)
+}
+
+func (rf *Raft) readLastIncludeEntry(args *pb.InstallSnapshotArgs) {
+	buf := bytes.NewBuffer(args.Data)
+	decoder := gob.NewDecoder(buf)
+	decoder.Decode(&args.LastIncludeIndex)
+	decoder.Decode(&args.LastIncludeTerm)
+}
+
+func (rf *Raft) truncateLog(lastIncludeIndex, lastIncludeTerm uint64) {
+	index := -1
+	entry0 := &pb.Entry{Term: lastIncludeTerm, Index: lastIncludeIndex}
+	for i := len(rf.me.entries) - 1; i >= 0; i-- {
+		if rf.me.entries[i].Index == lastIncludeIndex && rf.me.entries[i].Term == lastIncludeTerm {
+			index = i
+			break
+		}
+	}
+	if index != -1 {
+		rf.me.entries = append([]*pb.Entry{entry0}, rf.me.entries[index+1:]...)
+	} else {
+		rf.me.entries = []*pb.Entry{entry0}
+	}
+}
+
+func (rf *Raft) InstallSnapshot(ctx context.Context, args *pb.InstallSnapshotArgs) (reply *pb.InstallSnapshotReply, err error) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply = &pb.InstallSnapshotReply{
+		Term: rf.me.curTerm,
+	}
+
+	if args.Term < rf.me.curTerm {
+		return
+	}
+	rf.heartbeatChan <- struct{}{}
+	rf.me.leader = int64(args.LeaderID)
+
+	if rf.me.curTerm < args.Term {
+		rf.me.updateCurTerm(args.Term)
+		rf.me.updateStateTo(followerState)
+		reply.Term = args.Term
+		rf.me.savePersistState()
+	}
+	if args.LastConfig == nil || args.Data == nil {
+		return
+	}
+
+	rf.saveSnapshot(args)
+	rf.truncateLog(args.LastIncludeIndex, args.LastIncludeTerm)
+	rf.me.lastApplied = args.LastIncludeIndex
+	rf.me.commitIndex = args.LastIncludeIndex
+	rf.me.savePersistState()
+	// go rf.applySnapshot()
+
+	return
+}
+
+func (rf *Raft) sendInstallSnapshot(peer uint64, args *pb.InstallSnapshotArgs) (*pb.InstallSnapshotReply, error) {
+	conn, err := grpc.Dial(rf.me.peers[peer].Addr, grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("did not connect:%v\n", err)
+	}
+
+	c := pb.NewRaftClient(conn)
+	reply, err := c.InstallSnapshot(context.Background(), args)
+	return reply, err
+}
+
+func (rf *Raft) doInstallSnapshot(server uint64, args *pb.InstallSnapshotArgs) {
+	reply, errRPC := rf.sendInstallSnapshot(server, args)
+	if errRPC != nil {
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer func() {
+		rf.snapMu.Lock()
+		rf.isDuringSnap[server] = false
+		rf.snapMu.Unlock()
+	}()
+	if rf.me.curState != leaderState || rf.me.curTerm != args.Term {
+		return
+	}
+	if rf.me.curTerm < reply.Term {
+		rf.me.updateCurTerm(reply.Term)
+		rf.me.updateStateTo(followerState)
+		rf.me.savePersistState()
+		return
+	}
+	rf.me.nextIndex[server] = args.LastIncludeIndex + 1
+	rf.me.matchIndex[server] = args.LastIncludeIndex
 }
 
 func (rf *Raft) Kill() {
@@ -313,6 +447,7 @@ func (rf *Raft) run() {
 				case <-time.After(time.Duration(rf.config.randElectionTimeout()) * time.Millisecond):
 					rf.mu.Lock()
 					rf.updateStateTo(candidateState)
+					rf.me.savePersistState()
 					DPrintf(1, "=============followerState to candidateState, ID:%v, term:%v, curState:%v\n", rf.me.ID, rf.me.curTerm, rf.me.curState)
 					rf.mu.Unlock()
 				}
@@ -399,6 +534,9 @@ func Make(config *Config, peers []*Node, me *Node, applyMsg chan ApplyMsg) *Raft
 	rf.winVoteCampaign = make(chan struct{}, 16)
 	rf.commitChan = make(chan struct{})
 	rf.exitChan = make(chan struct{})
+	if config == DefaultConfig {
+		config.Peers = peers
+	}
 	rf.config = config
 
 	rf.me.peers = peers
@@ -408,7 +546,7 @@ func Make(config *Config, peers []*Node, me *Node, applyMsg chan ApplyMsg) *Raft
 	rf.me.votedFor = none
 	rf.me.applyMsg = applyMsg
 	rf.me.entries = append(rf.me.entries, &pb.Entry{Type: pb.EntryType_Normal, Term: 0, Index: 0})
-	rf.me.persister = newPersister(rf.me.ID)
+	rf.me.persister = newPersister(rf.me.ID, rf.config.WorkDir)
 	rf.me.readPersistState()
 
 	go rf.registerRPCServer()

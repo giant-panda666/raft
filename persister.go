@@ -12,21 +12,6 @@ type persister struct {
 	fileName string // persist file name
 }
 
-// for-test
-var workDir = "/tmp/"
-
-// SetPersisterFileDir set the directory to save persister file. If dir is "", use the default directory /tmp.
-func SetPersisterFileDir(dir string) {
-	if dir == "" {
-		return
-	}
-	if string(dir[len(dir)-1]) == "/" {
-		workDir = dir
-	} else {
-		workDir = dir + "/"
-	}
-}
-
 var ErrNoPersisterFile = errors.New("persister file not exists")
 
 func (p *persister) readPersistState() ([]byte, error) {
@@ -63,8 +48,11 @@ func (p *persister) removePersistFile() {
 	os.Remove(p.fileName)
 }
 
-func newPersister(id uint64) *persister {
+func newPersister(id uint64, dir string) *persister {
+	if dir != "" && string(dir[len(dir)-1]) != "/" {
+		dir = dir + "/"
+	}
 	return &persister{
-		fileName: workDir + strconv.FormatUint(id, 10) + ".raft",
+		fileName: dir + strconv.FormatUint(id, 10) + ".raft",
 	}
 }

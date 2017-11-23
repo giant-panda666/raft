@@ -5,6 +5,7 @@ package raftpb;
 service Raft {
     rpc AppendEntries(AppendEntriesArgs) returns(AppendEntriesReply){}
     rpc RequestVotes(RequestVotesArgs) returns(RequestVotesReply){}
+    rpc InstallSnapshot(InstallSnapshotArgs) returns(InstallSnapshotReply){}
     rpc Propose(ProposeArgs) returns(ProposeReply){}
     rpc ProposeConfChange(ProposeArgs) returns(ProposeReply){}
 }
@@ -46,6 +47,19 @@ message RequestVotesArgs {
 message RequestVotesReply {
     uint64 Term = 1;
     bool VoteGranted = 2;
+}
+
+message InstallSnapshotArgs {
+    uint64 Term = 1;
+    uint64 LeaderID = 2;
+    bytes LastConfig = 3;
+    bytes Data = 4;
+    uint64 LastIncludeIndex = 5;
+    uint64 LastIncludeTerm = 6;
+}
+
+message InstallSnapshotReply {
+    uint64 Term = 1;
 }
 
 // ProposeArgs is the log entry stored in Data which will be replicated to raft servers.
