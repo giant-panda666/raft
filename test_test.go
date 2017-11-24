@@ -27,7 +27,7 @@ func makeServers(n int) (res []*Raft, applies []chan ApplyMsg) {
 	}
 	for i := 0; i < n; i++ {
 		var tmpApply = make(chan ApplyMsg, 10)
-		var tmp = Make(DefaultConfig, nodes, nodes[i], tmpApply)
+		var tmp = Make(DefaultConfig, nodes, nodes[i], NewMemoryStorage(tmpApply), tmpApply)
 		applies = append(applies, tmpApply)
 		res = append(res, tmp)
 	}
@@ -36,15 +36,23 @@ func makeServers(n int) (res []*Raft, applies []chan ApplyMsg) {
 }
 
 func findLeader(t *testing.T, rfs []*Raft) int {
+	count := 0
+Loop:
 	for i, v := range rfs {
 		v.mu.Lock()
 		if v.me.leader == int64(v.me.ID) {
-			t.Logf("find leader:%v\n", v.me.leader)
+			//		t.Logf("find leader:%v\n", v.me.leader)
 			v.mu.Unlock()
 			return i
 		}
 		v.mu.Unlock()
 	}
+	count++
+	// may be leader election is not complete, try 3 times.
+	if count < 3 {
+		goto Loop
+	}
+
 	t.Errorf("not find leader...\n")
 	return 0
 }
@@ -69,6 +77,8 @@ type leaderRecord struct {
 
 // reset test enviroment
 func reset(t *testing.T) {
+	t.Logf("wait one second to reset environments...\n")
+	time.Sleep(time.Second)
 	removeTmpPersisterFile(t)
 	recordLeader.reset()
 }
@@ -155,19 +165,13 @@ func TestLogReplication(t *testing.T) {
 		"world",
 		"helloworld",
 	}
-	var args = []*pb.ProposeArgs{
-		&pb.ProposeArgs{
-			Data: []byte(msg[0]),
-		},
-		&pb.ProposeArgs{
-			Data: []byte(msg[1]),
-		},
-		&pb.ProposeArgs{
-			Data: []byte(msg[2]),
-		},
+	var args []*pb.ProposeArgs
+	for i := 0; i < 3; i++ {
+		args = append(args, &pb.ProposeArgs{Data: []byte(msg[i])})
 	}
 	time.Sleep(time.Second)
 	leaderIndex := findLeader(t, servers)
+	t.Logf("leaderIndex:%v\n", leaderIndex)
 
 	// --------------send log entry to leader, reply should be ok-------------------
 	reply, err := servers[leaderIndex].Propose(context.Background(), args[leaderIndex])
@@ -197,29 +201,40 @@ func TestLogReplication(t *testing.T) {
 	}
 
 	// ---------------------send log entry to follower----------------------------
-	stopLeader(t, servers)
-	time.Sleep(time.Second)
-	newLeaderIndex := findLeader(t, append(servers[:leaderIndex], servers[leaderIndex+1:]...))
 	var followerIndex int
 	for i := 0; i < 3; i++ {
-		if i != leaderIndex && i != newLeaderIndex {
-			followerIndex = i
+		if followerIndex == leaderIndex {
+			followerIndex++
+		} else {
+			break
 		}
 	}
-	t.Logf("leaderIndex:%v, newLeaderIndex:%v, followerIndex:%v\n", leaderIndex, newLeaderIndex, followerIndex)
+	t.Logf("followerIndex:%v\n", followerIndex)
+
 	reply, err = servers[followerIndex].Propose(context.Background(), args[followerIndex])
 	if err != nil {
 		t.Errorf("Propose RPC error:%s\n", err.Error())
 	}
-	if reply.Success != false || reply.ErrCode != ErrNotLeaderCode || reply.ErrMsg != ErrNotLeader.Error() || reply.Addr != servers[newLeaderIndex].me.Addr {
+	if reply.Success != false || reply.ErrCode != ErrNotLeaderCode || reply.ErrMsg != ErrNotLeader.Error() || reply.Addr != servers[leaderIndex].me.Addr {
 		t.Errorf("send log entry to follower failed...propose returns false...reply:%v\n", *reply)
 	}
 	t.Logf("send log entry to follower passed...\n")
 
 	// ---------------------send log entry to candidate---------------------------
-	servers[newLeaderIndex].Kill()
-	time.Sleep(time.Second)
-	candidateIndex := followerIndex
+	servers[leaderIndex].Kill()
+	servers[followerIndex].Kill()
+	t.Logf("kill leader and one follower, wait 3 sencond another follower to be candidate...\n")
+	time.Sleep(3 * time.Second)
+	var candidateIndex int
+	for i := 0; i < 3; i++ {
+		if candidateIndex == leaderIndex || candidateIndex == followerIndex {
+			candidateIndex++
+		} else {
+			break
+		}
+	}
+	t.Logf("candidateIndex:%v\n", candidateIndex)
+
 	reply, err = servers[candidateIndex].Propose(context.Background(), args[candidateIndex])
 	if err != nil {
 		t.Errorf("Propose RPC error:%s\n", err.Error())
@@ -228,8 +243,6 @@ func TestLogReplication(t *testing.T) {
 		t.Errorf("send log entry to candidate failed...propose returns false...reply:%v\n", *reply)
 	}
 	t.Logf("send log entry to candidate passed...\n")
-
-	// all server exit, clean persister file
 	servers[candidateIndex].Kill()
 }
 
@@ -251,4 +264,67 @@ func TestPersistRaftState(t *testing.T) {
 		t.Errorf("persister raft state failed...\nlen(entries):%v, after restart\nlen(entries):%v\n", lenentries, len(server1[leaderIndex].me.entries))
 	}
 	t.Logf("persist raft state passed...\n")
+	stopServers(server1)
+}
+
+///////////////////// snapshot ////////////
+func TestSnapshot(t *testing.T) {
+	reset(t)
+
+	node0 := &Node{
+		ID:         0,
+		Addr:       ":10086",
+		nextIndex:  make([]uint64, 2),
+		matchIndex: make([]uint64, 2),
+	}
+	node1 := &Node{
+		ID:         1,
+		Addr:       ":10087",
+		nextIndex:  make([]uint64, 2),
+		matchIndex: make([]uint64, 2),
+	}
+	peers := []*Node{node0, node1}
+	node0.nextIndex[1] = 2
+
+	raft0 := &Raft{}
+	raft1 := &Raft{}
+	raft0.me = node0
+	raft1.me = node1
+	raft0.heartbeatChan = make(chan struct{}, 16)
+	raft1.heartbeatChan = make(chan struct{}, 16)
+	raft0.commitChan = make(chan struct{})
+	raft1.commitChan = make(chan struct{})
+	applyMsg0, applyMsg1 := make(chan ApplyMsg), make(chan ApplyMsg)
+	s0 := NewMemoryStorage(applyMsg0)
+	s0.data = append(s0.data, []byte("hello"), []byte("world"))
+	s0.lastAppliedIndex = 2
+	s0.lastAppliedTerm = 2
+	s0.Save()
+	s1 := NewMemoryStorage(applyMsg1)
+	raft0.storage = s0
+	raft1.storage = s1
+	raft0.me.peers = peers
+	raft1.me.peers = peers
+	raft0.me.curState = leaderState
+	raft1.me.curState = followerState
+	raft0.me.leader = 0
+	raft1.me.leader = 0
+	raft0.me.curTerm = 3
+	raft1.me.curTerm = 3
+	raft1.me.persister = newPersister(1, "/tmp/")
+
+	raft0.me.entries = append(raft0.me.entries, &pb.Entry{Type: pb.EntryType_Normal, Term: 2, Index: 2})
+	raft0.me.commitIndex = 2
+	raft0.isDuringSnap = make([]bool, 2)
+	raft1.me.entries = append(raft1.me.entries, &pb.Entry{Type: pb.EntryType_Normal, Term: 0, Index: 0})
+	go raft0.registerRPCServer()
+	go raft1.registerRPCServer()
+	time.Sleep(time.Second)
+
+	raft0.broadcastAppendEntries()
+	time.Sleep(time.Second)
+	if len(s1.data) != 2 || string(s1.data[0]) != "hello" || string(s1.data[1]) != "world" {
+		t.Errorf("install snapshot failed...\n")
+	}
+	t.Logf("install snapshot passed...")
 }

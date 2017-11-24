@@ -1,15 +1,10 @@
 package raft
 
 import (
-	"bytes"
-	"encoding/gob"
 	"errors"
-	"io/ioutil"
 	"log"
 	"net"
-	"os"
 	pb "raft/raftpb"
-	"strconv"
 	"sync"
 	"time"
 
@@ -22,10 +17,9 @@ import (
 const snapshotChunkSize = 2 << 31
 
 type ApplyMsg struct {
-	Index       uint64
-	Command     []byte
-	UseSnapshot bool
-	Snapshot    []byte
+	Index   uint64
+	Term    uint64
+	Command []byte
 }
 
 type Raft struct {
@@ -255,6 +249,7 @@ func (rf *Raft) broadcastAppendEntries() {
 			continue
 		}
 		prevLogEntry := rf.me.prevLog(uint64(i))
+		DPrintf(0, "prevLogEntry:%v\n", prevLogEntry)
 		if prevLogEntry.Type == pb.EntryType_None {
 			rf.snapMu.Lock()
 			if rf.isDuringSnap[i] { // already in install snapshot
@@ -268,9 +263,8 @@ func (rf *Raft) broadcastAppendEntries() {
 				Term:     rf.me.curTerm,
 				LeaderID: rf.me.ID,
 			}
-			rf.readLastConfig(&args)
-			rf.readSnapshot(&args)
-			rf.readLastIncludeEntry(&args)
+			args.Data, args.LastIncludeIndex, args.LastIncludeTerm = rf.storage.Read()
+			DPrintf(0, "args.LastIncludeIndex:%v, args.LastIncludeTerm:%v\n", args.LastIncludeIndex, args.LastIncludeTerm)
 
 			go rf.doInstallSnapshot(uint64(i), &args)
 			continue
@@ -284,33 +278,6 @@ func (rf *Raft) broadcastAppendEntries() {
 		DPrintf(0, "baseIndex:%v, prevLogIndex:%v, PrevLogTerm:%v, rf.me.entries:%v, args.Entries:%v\n", baseIndex, args.PrevLogIndex, args.PrevLogTerm, rf.me.entries, args.Entries)
 		go rf.doAppendEntry(uint64(i), &args)
 	}
-}
-
-func (rf *Raft) readLastConfig(args *pb.InstallSnapshotArgs) {
-	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".conf"
-	args.LastConfig, _ = ioutil.ReadFile(fileName)
-}
-
-func (rf *Raft) saveLastConfig(args *pb.InstallSnapshotArgs) {
-	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".conf"
-	ioutil.WriteFile(fileName, args.LastConfig, os.ModePerm)
-}
-
-func (rf *Raft) readSnapshot(args *pb.InstallSnapshotArgs) {
-	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".snapshot"
-	args.Data, _ = ioutil.ReadFile(fileName)
-}
-
-func (rf *Raft) saveSnapshot(args *pb.InstallSnapshotArgs) {
-	fileName := rf.config.WorkDir + "raft" + strconv.FormatUint(rf.me.ID, 10) + ".snapshot"
-	ioutil.WriteFile(fileName, args.Data, os.ModePerm)
-}
-
-func (rf *Raft) readLastIncludeEntry(args *pb.InstallSnapshotArgs) {
-	buf := bytes.NewBuffer(args.Data)
-	decoder := gob.NewDecoder(buf)
-	decoder.Decode(&args.LastIncludeIndex)
-	decoder.Decode(&args.LastIncludeTerm)
 }
 
 func (rf *Raft) truncateLog(lastIncludeIndex, lastIncludeTerm uint64) {
@@ -336,6 +303,7 @@ func (rf *Raft) InstallSnapshot(ctx context.Context, args *pb.InstallSnapshotArg
 		Term: rf.me.curTerm,
 	}
 
+	DPrintf(0, "args.Term:%v, curTerm:%v, args.Data:%v\n", args.Term, rf.me.curTerm, len(args.Data))
 	if args.Term < rf.me.curTerm {
 		return
 	}
@@ -348,16 +316,15 @@ func (rf *Raft) InstallSnapshot(ctx context.Context, args *pb.InstallSnapshotArg
 		reply.Term = args.Term
 		rf.me.savePersistState()
 	}
-	if args.LastConfig == nil || args.Data == nil {
-		return
-	}
 
-	rf.saveSnapshot(args)
+	rf.storage.Write(args.Data, args.LastIncludeIndex, args.LastIncludeTerm)
+	rf.storage.Apply()
+
 	rf.truncateLog(args.LastIncludeIndex, args.LastIncludeTerm)
 	rf.me.lastApplied = args.LastIncludeIndex
 	rf.me.commitIndex = args.LastIncludeIndex
+	DPrintf(0, "lastApplied:%v, commitIndex:%v\n", rf.me.lastApplied, rf.me.commitIndex)
 	rf.me.savePersistState()
-	// go rf.applySnapshot()
 
 	return
 }
@@ -376,6 +343,7 @@ func (rf *Raft) sendInstallSnapshot(peer uint64, args *pb.InstallSnapshotArgs) (
 func (rf *Raft) doInstallSnapshot(server uint64, args *pb.InstallSnapshotArgs) {
 	reply, errRPC := rf.sendInstallSnapshot(server, args)
 	if errRPC != nil {
+		DPrintf(0, "errRPC:%v\n", errRPC)
 		return
 	}
 	rf.mu.Lock()
@@ -402,9 +370,8 @@ func (rf *Raft) Kill() {
 	if rf.exited {
 		return
 	}
-	rf.server.Stop()
-	rf.exitChan <- struct{}{}
 	rf.exited = true
+	rf.exitChan <- struct{}{}
 }
 
 func (rf *Raft) commitLogs() {
@@ -413,6 +380,7 @@ func (rf *Raft) commitLogs() {
 		case <-rf.commitChan:
 			rf.mu.Lock()
 			rf.me.commitLogs()
+			// todo if lastapply-baseindex > 2048?, take a snapshot
 			rf.mu.Unlock()
 		}
 	}
@@ -422,8 +390,9 @@ func (rf *Raft) run() {
 	for {
 		select {
 		case <-rf.exitChan:
-			// todo some persist
 			rf.me.savePersistState()
+			rf.me.leader = unknownLeader
+			rf.server.Stop()
 			return
 		default:
 			rf.mu.Lock()
@@ -526,7 +495,7 @@ func (rf *Raft) ProposeConfChange(ctx context.Context, args *pb.ProposeArgs) (*p
 	return rf.propose(entry)
 }
 
-func Make(config *Config, peers []*Node, me *Node, applyMsg chan ApplyMsg) *Raft {
+func Make(config *Config, peers []*Node, me *Node, storage Storage, applyMsg chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.me = me
 	rf.heartbeatChan = make(chan struct{}, 16)
@@ -538,6 +507,7 @@ func Make(config *Config, peers []*Node, me *Node, applyMsg chan ApplyMsg) *Raft
 		config.Peers = peers
 	}
 	rf.config = config
+	rf.storage = storage
 
 	rf.me.peers = peers
 	rf.me.curState = followerState

@@ -128,7 +128,7 @@ func (n *Node) commitLogs() {
 			return
 		}
 		n.lastApplied++
-		msg := ApplyMsg{Index: n.lastApplied, Command: l.Data}
+		msg := ApplyMsg{Index: n.lastApplied, Term: l.Term, Command: l.Data}
 		n.applyMsg <- msg
 	}
 }
@@ -171,6 +171,7 @@ func (n *Node) baseIndex() uint64 {
 func (n *Node) prevLog(peer uint64) *pb.Entry {
 	index := n.nextIndex[peer] - 1
 	baseIndex := n.baseIndex()
+	DPrintf(0, "peer:%v, index:%v, baseIndex:%v\n", peer, index, baseIndex)
 	if index < baseIndex {
 		return &pb.Entry{
 			Type:  pb.EntryType_None,
