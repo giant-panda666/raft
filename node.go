@@ -109,6 +109,7 @@ func (n *Node) updateCommitIndex() bool {
 		}
 
 		if 2*count > len(n.peers) {
+			//	DPrintf(0, "leader:%v, commitIndex:%v, i:%v\n", n.ID, n.commitIndex, i)
 			n.commitIndex = i
 			return true
 		}
@@ -142,6 +143,7 @@ func (n *Node) grantVote(candidateID uint64) {
 }
 
 func (n *Node) getCommitLog(index uint64) (*pb.Entry, bool) {
+	//	DPrintf(0, "index:%v, baseIndex:%v, len(n.entries):%v\n", index, n.baseIndex(), len(n.entries))
 	if index < n.baseIndex() || index > uint64(len(n.entries)) {
 		return &pb.Entry{}, false
 	}
@@ -171,7 +173,7 @@ func (n *Node) baseIndex() uint64 {
 func (n *Node) prevLog(peer uint64) *pb.Entry {
 	index := n.nextIndex[peer] - 1
 	baseIndex := n.baseIndex()
-	DPrintf(0, "peer:%v, index:%v, baseIndex:%v\n", peer, index, baseIndex)
+	//	DPrintf(0, "peer:%v, index:%v, baseIndex:%v\n", peer, index, baseIndex)
 	if index < baseIndex {
 		return &pb.Entry{
 			Type:  pb.EntryType_None,

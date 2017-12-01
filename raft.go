@@ -40,6 +40,7 @@ type Raft struct {
 
 	exited   bool
 	exitChan chan struct{}
+	waitExit chan struct{}
 
 	snapMu       sync.Mutex
 	isDuringSnap []bool
@@ -47,6 +48,7 @@ type Raft struct {
 }
 
 func (rf *Raft) RequestVotes(ctx context.Context, args *pb.RequestVotesArgs) (*pb.RequestVotesReply, error) {
+	//	DPrintf(0, "RequestVotes args:%v\n", args)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -117,7 +119,7 @@ func (rf *Raft) doRequestVote(peer uint64, args *pb.RequestVotesArgs) {
 	} else if reply.VoteGranted {
 		rf.me.voteCounter++
 		if rf.me.voteCounter > uint64(len(rf.me.peers)/2) && rf.me.curState == candidateState {
-			DPrintf(0, "////////////////////leader:%v, vote:%v, uint64(len(rf.me.peers)/2):%v\n", rf.me.ID, rf.me.voteCounter, uint64(len(rf.me.peers)/2))
+			//	DPrintf(0, "////////////////////leader:%v, vote:%v, uint64(len(rf.me.peers)/2):%v\n", rf.me.ID, rf.me.voteCounter, uint64(len(rf.me.peers)/2))
 			rf.updateStateTo(leaderState)
 			// for-testing
 			recordLeader.record(rf)
@@ -173,9 +175,11 @@ func (rf *Raft) AppendEntries(ctx context.Context, args *pb.AppendEntriesArgs) (
 			return
 		}
 		rf.me.entries = append(rf.me.entries[:args.PrevLogIndex+1-baseIndex], args.Entries...)
+		//DPrintf(0, "me.entries:%v, args.Entries:%v\n", rf.me.entries, args.Entries)
 	}
 	reply.Success = true
 	if args.LeaderCommit > rf.me.commitIndex {
+		//	DPrintf(0, "follower:%v, leaderID:%v, LeaderCommit:%v, commitIndex:%v, args.Entries:%v\n", rf.me.ID, args.LeaderID, args.LeaderCommit, rf.me.commitIndex, args.Entries)
 		rf.me.commitIndex = args.LeaderCommit
 		rf.commitChan <- struct{}{}
 	}
@@ -195,6 +199,7 @@ func (rf *Raft) sendAppendEntry(peer uint64, args *pb.AppendEntriesArgs) (reply 
 }
 
 func (rf *Raft) doAppendEntry(peer uint64, args *pb.AppendEntriesArgs) {
+	//	DPrintf(0, "3 leader:%v, commitIndex:%v, entries:%v, peer:%v\n", rf.me.ID, rf.me.commitIndex, rf.me.entries, peer)
 	reply, err := rf.sendAppendEntry(peer, args)
 	if err != nil {
 		return
@@ -217,6 +222,7 @@ func (rf *Raft) doAppendEntry(peer uint64, args *pb.AppendEntriesArgs) {
 		if len(args.Entries) > 0 {
 			rf.me.nextIndex[peer] = args.Entries[len(args.Entries)-1].Index + 1
 			rf.me.matchIndex[peer] = rf.me.nextIndex[peer] - 1
+			//	DPrintf(0, "leader:%v, peer:%v, nextIndex:%v\n", rf.me.ID, peer, rf.me.nextIndex[peer])
 		}
 		return
 	}
@@ -231,9 +237,11 @@ func (rf *Raft) broadcastAppendEntries() {
 	defer rf.mu.Unlock()
 
 	// commit log, update commitIndex
+	//	DPrintf(0, "1 leader:%v, commitIndex:%v, entries:%v\n", rf.me.ID, rf.me.commitIndex, rf.me.entries)
 	if rf.me.updateCommitIndex() {
 		rf.commitChan <- struct{}{}
 	}
+	//	DPrintf(0, "2 leader:%v, commitIndex:%v, entries:%v\n", rf.me.ID, rf.me.commitIndex, rf.me.entries)
 
 	args := pb.AppendEntriesArgs{
 		Term:         rf.me.curTerm,
@@ -243,13 +251,14 @@ func (rf *Raft) broadcastAppendEntries() {
 		Entries:      nil,
 		LeaderCommit: rf.me.commitIndex,
 	}
+	//DPrintf(0, "args:%v\n", args)
 
 	for i := range rf.me.peers {
 		if uint64(i) == rf.me.ID {
 			continue
 		}
 		prevLogEntry := rf.me.prevLog(uint64(i))
-		DPrintf(0, "prevLogEntry:%v\n", prevLogEntry)
+		//	DPrintf(0, "prevLogEntry:%v\n", prevLogEntry)
 		if prevLogEntry.Type == pb.EntryType_None {
 			rf.snapMu.Lock()
 			if rf.isDuringSnap[i] { // already in install snapshot
@@ -264,7 +273,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				LeaderID: rf.me.ID,
 			}
 			args.Data, args.LastIncludeIndex, args.LastIncludeTerm = rf.storage.Read()
-			DPrintf(0, "args.LastIncludeIndex:%v, args.LastIncludeTerm:%v\n", args.LastIncludeIndex, args.LastIncludeTerm)
+			//	DPrintf(0, "args.LastIncludeIndex:%v, args.LastIncludeTerm:%v\n", args.LastIncludeIndex, args.LastIncludeTerm)
 
 			go rf.doInstallSnapshot(uint64(i), &args)
 			continue
@@ -275,7 +284,7 @@ func (rf *Raft) broadcastAppendEntries() {
 		args.PrevLogTerm = prevLogEntry.Term
 		args.Entries = make([]*pb.Entry, len(rf.me.entries[args.PrevLogIndex+1-baseIndex:]))
 		copy(args.Entries, rf.me.entries[args.PrevLogIndex+1-baseIndex:])
-		DPrintf(0, "baseIndex:%v, prevLogIndex:%v, PrevLogTerm:%v, rf.me.entries:%v, args.Entries:%v\n", baseIndex, args.PrevLogIndex, args.PrevLogTerm, rf.me.entries, args.Entries)
+		//	DPrintf(0, "baseIndex:%v, prevLogIndex:%v, PrevLogTerm:%v, rf.me.entries:%v, args.Entries:%v\n", baseIndex, args.PrevLogIndex, args.PrevLogTerm, rf.me.entries, args.Entries)
 		go rf.doAppendEntry(uint64(i), &args)
 	}
 }
@@ -303,7 +312,7 @@ func (rf *Raft) InstallSnapshot(ctx context.Context, args *pb.InstallSnapshotArg
 		Term: rf.me.curTerm,
 	}
 
-	DPrintf(0, "args.Term:%v, curTerm:%v, args.Data:%v\n", args.Term, rf.me.curTerm, len(args.Data))
+	//	DPrintf(0, "args.Term:%v, curTerm:%v, args.Data:%v\n", args.Term, rf.me.curTerm, len(args.Data))
 	if args.Term < rf.me.curTerm {
 		return
 	}
@@ -323,7 +332,7 @@ func (rf *Raft) InstallSnapshot(ctx context.Context, args *pb.InstallSnapshotArg
 	rf.truncateLog(args.LastIncludeIndex, args.LastIncludeTerm)
 	rf.me.lastApplied = args.LastIncludeIndex
 	rf.me.commitIndex = args.LastIncludeIndex
-	DPrintf(0, "lastApplied:%v, commitIndex:%v\n", rf.me.lastApplied, rf.me.commitIndex)
+	//	DPrintf(0, "lastApplied:%v, commitIndex:%v\n", rf.me.lastApplied, rf.me.commitIndex)
 	rf.me.savePersistState()
 
 	return
@@ -343,7 +352,7 @@ func (rf *Raft) sendInstallSnapshot(peer uint64, args *pb.InstallSnapshotArgs) (
 func (rf *Raft) doInstallSnapshot(server uint64, args *pb.InstallSnapshotArgs) {
 	reply, errRPC := rf.sendInstallSnapshot(server, args)
 	if errRPC != nil {
-		DPrintf(0, "errRPC:%v\n", errRPC)
+		//	DPrintf(0, "errRPC:%v\n", errRPC)
 		return
 	}
 	rf.mu.Lock()
@@ -372,6 +381,7 @@ func (rf *Raft) Kill() {
 	}
 	rf.exited = true
 	rf.exitChan <- struct{}{}
+	<-rf.waitExit
 }
 
 func (rf *Raft) commitLogs() {
@@ -380,6 +390,7 @@ func (rf *Raft) commitLogs() {
 		case <-rf.commitChan:
 			rf.mu.Lock()
 			rf.me.commitLogs()
+			DPrintf(0, "id:%v, commitIndex:%v, entries:%v\n", rf.me.ID, rf.me.commitIndex, rf.me.entries)
 			// todo if lastapply-baseindex > 2048?, take a snapshot
 			rf.mu.Unlock()
 		}
@@ -393,6 +404,7 @@ func (rf *Raft) run() {
 			rf.me.savePersistState()
 			rf.me.leader = unknownLeader
 			rf.server.Stop()
+			rf.waitExit <- struct{}{}
 			return
 		default:
 			rf.mu.Lock()
@@ -467,6 +479,7 @@ func (rf *Raft) propose(entry *pb.Entry) (*pb.ProposeReply, error) {
 		entry.Term = rf.me.curTerm
 		entry.Index = rf.me.lastLogIndex() + 1
 		rf.me.entries = append(rf.me.entries, entry)
+		DPrintf(0, "propose: entries:%v\n", rf.me.entries)
 		return reply, nil
 	}
 
@@ -503,6 +516,7 @@ func Make(config *Config, peers []*Node, me *Node, storage Storage, applyMsg cha
 	rf.winVoteCampaign = make(chan struct{}, 16)
 	rf.commitChan = make(chan struct{})
 	rf.exitChan = make(chan struct{})
+	rf.waitExit = make(chan struct{})
 	if config == DefaultConfig {
 		config.Peers = peers
 	}

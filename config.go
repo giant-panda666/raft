@@ -10,6 +10,9 @@ type Config struct {
 	ElectionMinTimeout  int64
 	ElectionRandTimeout int64
 
+	// when the length of lastApplied log entry in entries(in raft state) reachs LogEntriesmaxSize, raft should take a snapshot.
+	LogEntriesMaxSize uint64
+
 	WorkDir string
 
 	Peers []*Node
@@ -25,5 +28,6 @@ var DefaultConfig = &Config{
 	HeartBeatInterval:   20,
 	ElectionMinTimeout:  150,
 	ElectionRandTimeout: 150,
+	LogEntriesMaxSize:   4096,
 	WorkDir:             "/tmp/",
 }
